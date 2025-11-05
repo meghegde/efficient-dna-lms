@@ -12,8 +12,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel
+import torch.distributed as dist
 
 from tokenizers import Tokenizer
+from transformers import AutoTokenizer
 from pre_training.lamb import Lamb
 from pre_training.config import BertConfig
 
@@ -26,11 +28,17 @@ from pre_training.utils import (
     seed_everything,
     get_world_size,
 )
-from pre_training.dataset import Dataset
+from pre_training.text_file_dataset import Dataset
 
-# Assuming being run on a SLURM system (remove "if" if not the case)
-if int(os.environ["SLURM_PROCID"]) == 0:
-    import wandb
+def check_tensor(x, name):
+    """Utility to catch NaN/inf tensors during forward."""
+    if not torch.is_tensor(x):
+        return
+    if not torch.isfinite(x).all():
+        rank = os.environ.get("RANK", "?")
+        print(f"\n[Rank {rank}] ⚠️ NaN/Inf detected in {name}: "
+              f"min={x.nan_to_num().min().item():.3e}, max={x.nan_to_num().max().item():.3e}, "
+              f"mean={x.nan_to_num().mean().item():.3e}, std={x.nan_to_num().std().item():.3e}")
 
 
 def parse_arguments():
@@ -39,26 +47,26 @@ def parse_arguments():
     # Required parameters
     parser.add_argument(
         "--input_path",
-        default="../data/processed/cached_{sequence_length}.txt",
+        default="./data/processed/cached_{sequence_length}.txt",
         type=str,
         help="The input data dir. Should be the cached text file.",
     )
     parser.add_argument(
         "--config_file",
-        default="../configs/base.json",
+        default="./configs/base.json",
         type=str,
         help="The BERT model config",
     )
     parser.add_argument(
         "--output_dir",
-        default="../checkpoints/elc_bert_base",
+        default="./checkpoints/elc_bert_base",
         type=str,
         help="The output directory where the model checkpoints \
             will be written.",
     )
     parser.add_argument(
         "--vocab_path",
-        default="../tokenizer.json",
+        default="./tokenizer.json",
         type=str,
         help="The vocabulary the BERT model will train on.",
     )
@@ -172,65 +180,11 @@ def parse_arguments():
     return args
 
 
-# FIXME Add type hint
-# TODO Add docstring
-
-
 @torch.no_grad()
-def log_parameter_histograms(model, step):
-    for name, param in model.named_parameters():
-        wandb.log(
-            {
-                f"parameters/norm_{name}": torch.linalg.norm(param.data).cpu().item(),
-                f"parameters/std_{name}": param.data.std().cpu().item(),
-            },
-            step=step,
-            commit=False,
-        )
-        if param.requires_grad and param.grad is not None:
-            wandb.log(
-                {
-                    f"gradients/norm_{name}": torch.linalg.norm(param.grad)
-                    .cpu()
-                    .item(),
-                    f"gradients/std_{name}": param.grad.std().cpu().item(),
-                },
-                step=step,
-                commit=False,
-            )
-        if "prev_layer_weights" in name:
-            d = F.softmax(param.data.cpu(), dim=-1).numpy()
-            param_dict = {f"layer_weights/{name}_{i}": d[i] for i in range(len(d))}
-            wandb.log(param_dict, step=step, commit=False)
-
 
 def setup_training(args):
     assert torch.cuda.is_available()
     args.n_gpu = torch.cuda.device_count()
-
-    world_size = int(os.environ["WORLD_SIZE"])
-    rank = int(os.environ["SLURM_PROCID"])
-    gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
-    assert gpus_per_node == torch.cuda.device_count()
-    print(
-        f"Hello from rank {rank} of {world_size} on {gethostname()} where \
-            there are {gpus_per_node} allocated GPUs per node.",
-        flush=True,
-    )
-
-    seed_everything(args.seed + rank)
-
-    torch.distributed.init_process_group(
-        backend="nccl", rank=rank, world_size=world_size
-    )
-    if rank == 0:
-        print(f"Group initialized? {torch.distributed.is_initialized()}", flush=True)
-
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    print(f"RCCL started on device {device}", flush=True)
-    print(f"host: {gethostname()}, rank: {rank}, local_rank: {local_rank}")
 
     if is_main_process():
         os.system(f"mkdir -p {args.output_dir}")
@@ -252,17 +206,8 @@ def setup_training(args):
 
     args.device_max_steps = args.max_steps
 
-    if is_main_process():
-        wandb.init(
-            name=args.wandb_name,
-            config=args,
-            id=args.wandb_id,
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            resume="auto",
-            allow_val_change=True,
-            reinit=True,
-        )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    local_rank = 1
 
     return device, local_rank
 
@@ -273,15 +218,9 @@ def prepare_model_and_optimizer(args, device, local_rank, checkpoint):
 
     if is_main_process():
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        wandb.config.update(config.to_dict())
-        wandb.config.update({"n_params": n_params})
-        print(model)
-        print(f"NUMBER OF PARAMETERS: {n_params}\n", flush=True)
 
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"], strict=False)
-
-    model.to(device)
 
     no_decay = ["bias", "layer_norm", "embedding", "prev_layer_weights"]
     high_no = ["res"]
@@ -342,9 +281,22 @@ def prepare_model_and_optimizer(args, device, local_rank, checkpoint):
         0.1,
     )
 
+    # Get rank info from torchrun
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="nccl",      # for GPU
+            init_method="env://"
+        )
+
+    local_rank = int(os.environ["LOCAL_RANK"])  # torchrun sets this automatically
+    torch.cuda.set_device(local_rank)
+
+    model = model.to(local_rank)
+
     model = DistributedDataParallel(
         model,
         device_ids=[local_rank],
+        output_device=local_rank,
         bucket_cap_mb=torch.cuda.get_device_properties(device).total_memory,
         broadcast_buffers=False,
         gradient_as_bucket_view=True,
@@ -361,7 +313,7 @@ def prepare_model_and_optimizer(args, device, local_rank, checkpoint):
     return model, config, optimizer, scheduler, grad_scaler
 
 
-def training_epoch(
+def original_training_epoch(
     model,
     tokenizer,
     data,
@@ -396,10 +348,17 @@ def training_epoch(
         train_iter = train_dataloader
 
     for local_step, batch in enumerate(train_iter):
-        input_ids, attention_mask, target_ids = [
-            t.to(device, non_blocking=True) for t in batch
-        ]
+        # Explicitly extract tensors from the batch dict and move to device
+        input_ids = batch['input_ids'].to(device, non_blocking=True)
+        attention_mask = batch['attention_mask'].to(device, non_blocking=True).bool()
+        target_ids = batch['target_ids'].to(device, non_blocking=True)
+
         input_ids, target_ids = input_ids.t(), target_ids.t()
+        for i in range(3):
+            print(f"Decoded {i}: {tokenizer.decode(input_ids[i])}")
+
+        check_tensor(input_ids, "input_ids")
+        check_tensor(attention_mask, "attention_mask")
 
         with torch.cuda.amp.autocast(args.mixed_precision):
             model.train()
@@ -410,7 +369,11 @@ def training_epoch(
             loss = F.cross_entropy(
                 prediction, target_ids, label_smoothing=args.label_smoothing
             )
+            print(loss)
+            print(type(loss))
             loss /= args.gradient_accumulation
+            print(loss)
+            print(type(loss))
             total_loss += loss.item()
 
         with torch.no_grad():
@@ -423,6 +386,7 @@ def training_epoch(
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.max_gradient)
 
             return_value = grad_scaler.step(optimizer)
+
             grad_scaler.update()
 
             optimizer.zero_grad(set_to_none=True)
@@ -441,20 +405,14 @@ def training_epoch(
                                     lr: {optimizer.param_groups[0]['lr']:.5f}"
                 )
 
-                if global_step % 100 == 0:
-                    log_parameter_histograms(model, global_step)
-
-                wandb.log(
-                    {
-                        "epoch": epoch,
-                        "train/loss": total_loss,
-                        "train/accuracy": avg_accuracy * 100.0,
-                        "stats/learning_rate": optimizer.param_groups[0]["lr"],
-                        "stats/grad_norm": grad_norm,
-                        "stats/seq_length": data.seq_length,
-                    },
-                    step=global_step,
-                )
+    if not torch.isfinite(loss):
+        print(f"[Rank {os.environ.get('RANK')}] NaN/inf loss detected at step {global_step}")
+        for name, param in model.named_parameters():
+            if torch.isnan(param).any():
+                print(f"NaN in param: {name}")
+        for name, buf in model.named_buffers():
+            if torch.isnan(buf).any():
+                print(f"NaN in buffer: {name}")
 
                 total_loss = 0
                 avg_accuracy = 0
@@ -470,6 +428,125 @@ def training_epoch(
         if global_step >= args.device_max_steps or local_step >= max_local_steps - 1:
             optimizer.zero_grad(set_to_none=True)
             return global_step
+
+    optimizer.zero_grad(set_to_none=True)
+
+    return global_step
+
+
+
+def training_epoch(
+    model,
+    tokenizer,
+    data,
+    optimizer,
+    scheduler,
+    grad_scaler,
+    global_step,
+    epoch,
+    args,
+    device,
+    max_local_steps,
+):
+    seed = args.seed + get_rank() + epoch * get_world_size()
+    train_dataloader = create_train_dataloader(data, args, global_step, seed)
+
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+
+    total_loss = 0.0
+    avg_accuracy = 0.0
+
+    if is_main_process():
+        current_step = global_step * args.gradient_accumulation
+        max_steps = args.device_max_steps * args.gradient_accumulation
+        train_iter = tqdm(
+            train_dataloader,
+            desc="Train iteration",
+            initial=current_step,
+            total=max_steps,
+        )
+    else:
+        train_iter = train_dataloader
+
+    for local_step, batch in enumerate(train_iter):
+        # ----------------------------
+        # Move tensors to device
+        # ----------------------------
+        input_ids = batch['input_ids'].to(device, non_blocking=True)
+        attention_mask = batch['attention_mask'].to(device, non_blocking=True).bool()
+        target_ids = batch['target_ids'].to(device, non_blocking=True)
+
+        # Transpose if model expects seq_len first
+        input_ids, target_ids = input_ids.t(), target_ids.t()
+
+        # Optional: inspect sequences
+        for i in range(min(3, input_ids.size(1))):
+            print(f"Decoded {i}: {tokenizer.decode(input_ids[:, i])}")
+
+        # ----------------------------
+        # Forward pass with AMP
+        # ----------------------------
+        with torch.cuda.amp.autocast(enabled=args.mixed_precision):
+            prediction = model(input_ids, attention_mask, target_ids)  # [seq_len, batch, vocab_size]
+
+            # Flatten predictions and targets
+            pred_flat = prediction.reshape(-1, prediction.size(-1))      # [seq_len*batch, vocab_size]
+            target_flat = target_ids.reshape(-1)                         # [seq_len*batch]
+
+            # Mask out unmasked tokens
+            mask = target_flat != -100
+            masked_pred = pred_flat[mask]
+            masked_target = target_flat[mask]
+
+            # MLM loss
+            loss = F.cross_entropy(masked_pred, masked_target, label_smoothing=args.label_smoothing)
+            loss /= args.gradient_accumulation
+            total_loss += loss.item()
+
+        # ----------------------------
+        # MLM accuracy
+        # ----------------------------
+        with torch.no_grad():
+            accuracy = (masked_pred.argmax(-1) == masked_target).float().mean()
+            avg_accuracy += accuracy.item() / args.gradient_accumulation
+
+        # ----------------------------
+        # Backward pass & optimizer step
+        # ----------------------------
+        grad_scaler.scale(loss).backward()
+
+        if (local_step + 1) % args.gradient_accumulation == 0:
+            grad_scaler.unscale_(optimizer)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.max_gradient)
+
+            step_result = grad_scaler.step(optimizer)
+            grad_scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            global_step += 1
+
+            scheduler.step()
+
+            # ----------------------------
+            # Logging
+            # ----------------------------
+            if is_main_process():
+                train_iter.set_postfix_str(
+                    f"loss: {total_loss:.2f}, "
+                    f"accuracy: {avg_accuracy*100:.2f}%, "
+                    f"grad_norm: {grad_norm:.2f}, "
+                    f"lr: {optimizer.param_groups[0]['lr']:.6f}"
+                )
+
+        # ----------------------------
+        # Exit conditions
+        # ----------------------------
+        if not torch.isfinite(loss):
+            print(f"[Rank {os.environ.get('RANK')}] NaN/inf loss detected at step {global_step}")
+            break
+
+        if global_step >= args.device_max_steps or local_step >= max_local_steps - 1:
+            break
 
     optimizer.zero_grad(set_to_none=True)
     return global_step
@@ -501,16 +578,11 @@ def load_dataset(args, tokenizer, device):
         if global_step >= int(args.device_max_steps * args.long_after)
         else args.seq_length
     )
-    train_data = Dataset(
-        args.input_path.format(sequence_length=seq_length),
-        get_rank(),
-        get_world_size(),
-        tokenizer,
-        seq_length,
-        args.mask_p,
-        args.short_p,
-    )
+    # Using new text_file_dataset.py
+    train_data = Dataset(args.input_path, tokenizer, max_length=seq_length)
+
     print(f"Loaded training file {get_rank()}", flush=True)
+    print(f"First item: {train_data.__getitem__(0)}")
 
     batch_size = (
         args.batch_size // 4
@@ -531,15 +603,26 @@ def create_train_dataloader(data, args, global_step, seed):
         if global_step >= int(args.device_max_steps * args.long_after)
         else args.batch_size
     )
-    train_dataloader = DataLoader(
-        data,
-        shuffle=True,
-        batch_size=batch_size,
-        num_workers=7 - 1,
-        generator=torch.Generator().manual_seed(seed),
-        drop_last=True,
-        pin_memory=True,
-    )
+
+    def collate_fn(batch):
+        """
+        batch: list of items returned by Dataset
+        Each item is a dict: {'input_ids': tensor, 'attention_mask': tensor}
+        """
+        input_ids = torch.stack([item['input_ids'] for item in batch])
+        attention_mask = torch.stack([item['attention_mask'] for item in batch])
+        # Add target_ids if needed for MLM, e.g., same as input_ids or with masking
+        target_ids = input_ids.clone()  # for MLM, or generate masked labels here
+        return {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'target_ids': target_ids
+        }
+
+    # DataLoader
+    train_dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=7-1,
+        generator=torch.Generator().manual_seed(seed), drop_last=True, pin_memory=True, collate_fn=collate_fn)
+
     return train_dataloader
 
 
@@ -558,11 +641,8 @@ if __name__ == "__main__":
         args = argparse.Namespace(**args)
     else:
         checkpoint, initial_epoch, global_step = None, 0, 0
-        args.wandb_id = (
-            wandb.util.generate_id() if int(os.environ["SLURM_PROCID"]) == 0 else 0
-        )
 
-    tokenizer = Tokenizer.from_file(args.vocab_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.vocab_path)
     device, local_rank = setup_training(args)
     model, config, optimizer, scheduler, grad_scaler = prepare_model_and_optimizer(
         args, device, local_rank, checkpoint
