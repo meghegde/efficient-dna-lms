@@ -22,29 +22,30 @@ def parse_arguments():
     parser.add_argument(
         "--model_variant",
         default="base",
-        type="str",
+        type=str,
         help="The model variant to use; base, zero, normalized, or weighted_output."
     )
     parser.add_argument(
         "--pretrained_model_path",
-        type="str",
+        type=str,
         help="Path to the pretrained pytorch_model.bin."
     )
     parser.add_argument(
         "--dataset",
         default="eQTL",
-        type="str",
+        type=str,
         help="The dataset on which to fine-tune the model."
     )
     parser.add_argument(
         "--loss_convergence",
         default="True",
-        type="str",
+        type=str,
         help="Whether to train until loss converges"
     )
     # Other arguments
     parser.add_argument(
         "--seq_length",
+        type=int,
         default=512
     )
     parser.add_argument(
@@ -56,6 +57,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--num_epochs",
+        type=int,
         default=5
     )
     parser.add_argument(
@@ -64,8 +66,14 @@ def parse_arguments():
         type=float
     )
     parser.add_argument(
-        "--seed", type=int, default=42, help="random seed for initialization"
+        "--seed",
+        type=int,
+        default=42,
+        help="random seed for initialisation"
     )
+
+    args = parser.parse_args()
+    return args
  
 class VarDataset(torch.utils.data.Dataset):
     def __init__(self, encodings, labels):
@@ -82,7 +90,7 @@ class VarDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.labels)
 
-def load_dataset(args, tok_path):
+def load_data(args, tok_path):
     if args.dataset=="eQTL":
         # Load tokeniser
         tokeniser = AutoTokenizer.from_pretrained(tok_path)
@@ -217,7 +225,10 @@ if __name__ == "__main__":
 
     # Constants
     tok_path = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
-    model_name = f"{args.model_variant}_len-{args.seq_length}_{args.num_epochs}-epochs_{args.seed}"
+    if args.loss_convergence.upper() == "TRUE":
+        model_name = f"{args.model_variant}_len-{args.seq_length}_{args.seed}"
+    else:
+        model_name = f"{args.model_variant}_len-{args.seq_length}_{args.num_epochs}-epochs_{args.seed}"
     odir = f"./trained_models/{model_name}/model.bin"
     logdir = f"./logs/{model_name}.txt"
     tblogdir = f"./tblogs/{model_name}"
@@ -226,7 +237,7 @@ if __name__ == "__main__":
     tokeniser = AutoTokenizer.from_pretrained(tok_path)
 
     # Load data
-    train_dataset, val_dataset = load_dataset(args)
+    train_dataset, val_dataset = load_data(args, tok_path)
 
     # Load model
     model = load_model(args)
