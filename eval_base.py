@@ -24,7 +24,8 @@ transformers.set_seed(42)
 MAX_LEN = 512
 TASK_NAME = "variant_effect_causal_eqtl"
 TOK_PATH = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
-MODEL_NAME = "./trained_models/elc-bert-base_len-512_1000-steps_5_epochs_42/pytorch_model.bin"
+#MODEL_NAME = "./trained_models/elc-bert-base_len-512_1000-steps_5_epochs_42/pytorch_model.bin"
+MODEL_NAME = "./trained_models/base_len-512_42/model.bin/pytorch_model.bin"
 CONFIG_PATH = "./configs/base.json"
 
 # Load dataset
@@ -95,3 +96,6 @@ trainer = Trainer(
 # Evaluate
 eval_results = trainer.evaluate()
 print(eval_results)
+
+# Base model, pretrained for 1000 steps, then fine-tuned to convergence
+# {'eval_loss': 0.6905571818351746, 'eval_accuracy': 0.6018957345971564, 'eval_f1': 0.48973098061903386, 'eval_runtime': 54.211, 'eval_samples_per_second': 163.472, 'eval_steps_per_second': 3.413}
