@@ -164,3 +164,25 @@ class BertForBinaryClassification(nn.Module):
 
         return {"logits": logits, "loss": loss}
 
+    @classmethod
+    def from_pretrained(cls, model_bin_path, config, map_location="cpu"):
+        """
+        Load pretrained model from model.bin file.
+        """
+
+        # Create a fresh model object
+        model = cls(config) # cls = class; self = instance
+        # Load state dict
+        state_dict = torch.load(model_bin_path, map_location=map_location)
+        # Load with strict=False to allow missing/unexpected keys
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+        # Load with strict=False to allow missing/unexpected keys
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print("Missing keys:", missing)
+        if unexpected:
+            print("Unexpected keys:", unexpected)
+
+        return model
+
