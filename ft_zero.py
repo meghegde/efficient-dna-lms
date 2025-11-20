@@ -1,59 +1,31 @@
-import os
-import torch
-from torch.utils.data import DataLoader
-import transformers
-from transformers import AutoTokenizer, BertConfig, BertForSequenceClassification
-from transformers import Trainer, TrainingArguments
-from models.model_elc_bert_base import Bert
-from pre_training.config import BertConfig
-from datasets import load_dataset
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import evaluate
-from load_custom_model import load_custom_model
-from models.classification_wrapper import BertForBinaryClassification
-
-GPU = "cuda"  # use "cuda:x" where x is an int is needed to select the gpu when the script is launched in an owned multiGPU server.
-
-# Set random seed
-seed = 42
-transformers.set_seed(seed)
+import torch
+from datasets import load_dataset
+import transformers
+from transformers import AutoTokenizer
+from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
+from models.zero_clf_wrapper import BertForBinaryClassification
+from pre_training.config import BertConfig
 
 # Constants
+seed = 42
 tok_path = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
-seq_len = 512
-task_name = "variant_effect_causal_eqtl"
 config_path = "configs/base.json"
-model_name = f"elc-bert-zero_len-512_1000-steps"
-model_path = f"checkpoints/{model_name}/model.bin"
-num_epochs = 5
-odir = f"./trained_models/{model_name}_{num_epochs}_epochs_{seed}"
-logdir = f"./logs/{model_name}_{num_epochs}_epochs_{seed}.txt"
-os.makedirs(logdir, exist_ok=True)
+model_variant = "zero"
+seq_length = 512
+pretrained_weights = "checkpoints/elc-bert-zero_len-512_1000-steps/model.bin"
+model_name = f"{model_variant}_len-{seq_length}_{seed}"
+odir = f"./trained_models/{model_name}/model.bin"
+logdir = f"./logs/{model_name}.txt"
+tblogdir = f"./tblogs/{model_name}"
 
-# # Load and process data
+# Set random seed
+transformers.set_seed(seed)
 
-# Load tokeniser
-tokeniser = AutoTokenizer.from_pretrained(tok_path)
-
-# Load training dataset
-dataset = load_dataset(
-    "InstaDeepAI/genomics-long-range-benchmark",
-    task_name=task_name,
-    sequence_length=seq_len,
-    split="train"
-)
-# Separate data and labels
-df = pd.DataFrame.from_dict(dataset)
-seqs = df['alt_forward_sequence'].to_list()
-labels = df['label'].to_list()
-# Split into training and validation
-train_seqs, val_seqs, train_labels, val_labels = train_test_split(seqs, labels, test_size=.2, shuffle=True, random_state=42)
-# Encode data
-train_encodings = tokeniser(train_seqs, padding=True, truncation=True, max_length=seq_len, return_tensors='pt')
-val_encodings = tokeniser(val_seqs, padding=True, truncation=True, max_length=seq_len, return_tensors='pt')
-
+# Define custom dataset class
 class VarDataset(torch.utils.data.Dataset):
     def __init__(self, encodings, labels):
         self.encodings = encodings
@@ -69,52 +41,93 @@ class VarDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.labels)
 
+# Load tokeniser
+tokeniser = AutoTokenizer.from_pretrained(tok_path)
+
+# Load training dataset
+dataset = load_dataset(
+    "InstaDeepAI/genomics-long-range-benchmark",
+    task_name="variant_effect_causal_eqtl",
+    sequence_length=seq_length,
+    split="train"
+)
+# Separate data and labels
+df = pd.DataFrame.from_dict(dataset)
+seqs = df['alt_forward_sequence'].to_list()
+labels = df['label'].to_list()
+# Split into training and validation
+train_seqs, val_seqs, train_labels, val_labels = train_test_split(seqs, labels, test_size=.2, shuffle=True, random_state=42)
+# Encode data
+train_encodings = tokeniser(train_seqs, padding=True, truncation=True, max_length=seq_length, return_tensors='pt')
+val_encodings = tokeniser(val_seqs, padding=True, truncation=True, max_length=seq_length, return_tensors='pt')
+# Convert to correct format
 train_dataset = VarDataset(train_encodings, train_labels)
 val_dataset = VarDataset(val_encodings, val_labels)
 
-# Load pretrained model
+# Load model and pretrained weights
 config = BertConfig(config_path)
 config.num_labels = 2
-model = BertForBinaryClassification(config)
-if os.path.exists(model_path):
-    state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(state_dict, strict=False)
-else:
-    print(f"Checkpoint {model_path} not found. Initializing model from scratch.")
-device = torch.device(GPU if torch.cuda.is_available() else "cpu")
-print('Working on device: ', device)
-model.to(device)
+model = BertForBinaryClassification(config, num_labels=2)
+state_dict = torch.load(pretrained_weights, map_location="cpu", weights_only=False)
+model.load_state_dict(state_dict, strict=False)
 
-# # Set up training
-# Set training arguments
+# Define metrics
+def compute_metrics(eval_pred):
+    # eval_pred is (preds, labels) from Trainer
+    preds, labels = eval_pred
+
+    # preds can be logits or dict; normalize to ndarray
+    if isinstance(preds, (tuple, list)):
+        preds = preds[0]
+    preds = np.asarray(preds)
+
+    # Case A: two-logit softmax head -> take argmax over classes
+    if preds.ndim == 2 and preds.shape[1] == 2:
+        pred_ids = preds.argmax(axis=1).astype(np.int32)
+
+    # Case B: single-logit sigmoid head -> threshold at 0.5
+    elif preds.ndim == 2 and preds.shape[1] == 1:
+        pred_ids = (preds.squeeze(1) > 0.5).astype(np.int32)
+
+    # Case C: already class IDs
+    elif preds.ndim == 1:
+        pred_ids = preds.astype(np.int32)
+
+    else:
+        raise ValueError(f"Unexpected preds shape {preds.shape}")
+
+    # Labels to int32
+    labels = np.asarray(labels).astype(np.int32)
+    # Flatten if shape is (B,1)
+    if labels.ndim > 1:
+        labels = labels.reshape(-1)
+
+    # Compute accuracy directly (avoid extra format errors)
+    accuracy = (pred_ids == labels).mean().item()
+
+    return {"accuracy": accuracy}
+
+# Define training arguments
+# Create Early Stopping callback
+es = EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=0.0)
+
+# Set up training arguments
 training_args = TrainingArguments(
     output_dir=odir,
     eval_strategy="epoch",
-    num_train_epochs=num_epochs,
     per_device_train_batch_size=8,
     per_device_eval_batch_size=8,
     save_safetensors=False,
     save_total_limit=2,  # save only the two latest checkpoints
     save_strategy="epoch",
     load_best_model_at_end=True,  # This saves also the best performing one
-    logging_dir = logdir,  # <-- directory for TensorBoard logs
-    logging_strategy = "steps",  # log every n steps
-    logging_steps = 50  # or another frequency you prefer
-    )
-
-# Load accuracy metric
-accuracy_metric = evaluate.load('accuracy')
-f1_metric = evaluate.load("f1")
-
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    probs = 1 / (1 + np.exp(-logits))
-    predictions = (probs > 0.5).astype(int)
-
-    return {
-        "accuracy": accuracy_metric.compute(predictions=predictions, references=labels)["accuracy"],
-        "f1": f1_metric.compute(predictions=predictions, references=labels)["f1"],
-    }
+    logging_dir=tblogdir,  # <-- directory for TensorBoard logs
+    logging_strategy="steps",  # log every n steps
+    logging_steps=50,
+    # Arguments for early stopping
+    metric_for_best_model='loss',
+    greater_is_better=False,
+)
 
 # Create trainer instance
 trainer = Trainer(
@@ -122,7 +135,8 @@ trainer = Trainer(
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
-    compute_metrics=compute_metrics
+    compute_metrics=compute_metrics,
+    callbacks=[es]
 )
 
 # Train model
@@ -131,8 +145,9 @@ trainer.train()
 # Save trained model
 trainer.save_model(odir)
 
-# Save logs
+# Save training logs
 history = trainer.state.log_history
 logSave = open(logdir, 'w')
 logSave.write(str(history))
 logSave.close()
+

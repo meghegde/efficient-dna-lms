@@ -259,16 +259,106 @@ class Attention(nn.Module):
         self.in_proj_v.bias.data.zero_()
         self.out_proj.bias.data.zero_()
 
+    # def forward(self, hidden_states, attention_mask, relative_embedding):
+    #     key_len, batch_size, _ = hidden_states.size()
+    #     query_len = key_len
+
+    #     if self.position_indices.size(0) < query_len:
+    #         position_indices = torch.arange(query_len, dtype=torch.long).unsqueeze(
+    #             1
+    #         ) - torch.arange(query_len, dtype=torch.long).unsqueeze(0)
+    #         position_indices = self.make_log_bucket_position(
+    #             position_indices, self.config.position_bucket_size, 512
+    #         )
+    #         position_indices = self.config.position_bucket_size - 1 + position_indices
+    #         self.register_buffer(
+    #             "position_indices",
+    #             position_indices.to(hidden_states.device),
+    #             persistent=True,
+    #         )
+
+    #     hidden_states = self.pre_layer_norm(hidden_states)
+
+    #     query, key = self.in_proj_qk(hidden_states).chunk(2, dim=2)  # shape: [T, B, D]
+    #     value = self.in_proj_v(hidden_states)  # shape: [T, B, D]
+
+    #     query_pos, key_pos = self.in_proj_qk(self.dropout(relative_embedding)).chunk(
+    #         2, dim=-1
+    #     )  # shape: [2C-1, D]
+    #     query_pos = query_pos.view(
+    #         -1, self.num_heads, self.head_size
+    #     )  # shape: [2C-1, H, D]
+    #     key_pos = key_pos.view(
+    #         -1, self.num_heads, self.head_size
+    #     )  # shape: [2C-1, H, D]
+
+    #     query = query.reshape(
+    #         query_len, batch_size * self.num_heads, self.head_size
+    #     ).transpose(0, 1)
+    #     key = key.reshape(
+    #         key_len, batch_size * self.num_heads, self.head_size
+    #     ).transpose(0, 1)
+    #     value = value.view(
+    #         key_len, batch_size * self.num_heads, self.head_size
+    #     ).transpose(0, 1)
+
+    #     attention_scores = torch.bmm(
+    #         query, key.transpose(1, 2) * self.scale
+    #     )  # shape: [B, H, Tq, Tk]
+    #     attention_scores = attention_scores.view(
+    #         batch_size, self.num_heads, query_len, key_len
+    #     )
+
+    #     query = query.view(batch_size, self.num_heads, query_len, self.head_size)
+    #     key = key.view(batch_size, self.num_heads, query_len, self.head_size)
+
+    #     attention_scores_qp = torch.einsum(
+    #         "bhqd,khd->bhqk", query, key_pos * self.scale
+    #     )  # shape: [B, H, Tq, Tr]
+    #     attention_scores_pk = torch.einsum(
+    #         "bhkd,qhd->bhqk", key * self.scale, query_pos
+    #     )  # shape: [B, H, Tr, Tk]
+
+    #     position_indices = self.position_indices[:query_len, :key_len].expand(
+    #         batch_size, self.num_heads, -1, -1
+    #     )
+
+    #     attention_scores_qp = attention_scores_qp.gather(
+    #         dim=-1, index=position_indices
+    #     )  # shape: [B, H, Tq, Tk]
+    #     attention_scores_pk = attention_scores_pk.gather(
+    #         dim=-2, index=position_indices
+    #     )  # shape: [B, H, Tq, Tk]
+
+    #     attention_scores.add_(attention_scores_qp)
+    #     attention_scores.add_(attention_scores_pk)
+
+    #     attention_probs = MaskedSoftmax.apply(attention_scores, attention_mask, -1)
+
+    #     attention_probs = self.dropout(attention_probs)
+    #     context = torch.bmm(attention_probs.flatten(0, 1), value)  # shape: [B*H, Q, D]
+    #     context = context.transpose(0, 1).reshape(
+    #         context.size(1), -1, self.hidden_size
+    #     )  # shape: [Q, B, H*D]
+    #     context = self.out_proj(context)
+    #     context = self.post_layer_norm(context)
+    #     context = self.dropout(context)
+
+    #     return context
+
     def forward(self, hidden_states, attention_mask, relative_embedding):
-        key_len, batch_size, _ = hidden_states.size()
-        query_len = key_len
+        # hidden_states: [T, B, D]
+        L = hidden_states.size(0)        # seq_len
+        B = hidden_states.size(1)        # batch_size
+        D = hidden_states.size(2)
+        query_len = L
+        key_len = L
 
         if self.position_indices.size(0) < query_len:
-            position_indices = torch.arange(query_len, dtype=torch.long).unsqueeze(
-                1
-            ) - torch.arange(query_len, dtype=torch.long).unsqueeze(0)
+            position_indices = torch.arange(query_len, dtype=torch.long).unsqueeze(1) - \
+                            torch.arange(query_len, dtype=torch.long).unsqueeze(0)
             position_indices = self.make_log_bucket_position(
-                position_indices, self.config.position_bucket_size, 512
+                position_indices, self.config.position_bucket_size, query_len
             )
             position_indices = self.config.position_bucket_size - 1 + position_indices
             self.register_buffer(
@@ -279,67 +369,96 @@ class Attention(nn.Module):
 
         hidden_states = self.pre_layer_norm(hidden_states)
 
-        query, key = self.in_proj_qk(hidden_states).chunk(2, dim=2)  # shape: [T, B, D]
-        value = self.in_proj_v(hidden_states)  # shape: [T, B, D]
+        # [T, B, D] -> project
+        query, key = self.in_proj_qk(hidden_states).chunk(2, dim=2)
+        value = self.in_proj_v(hidden_states)  # [T, B, D]
 
-        query_pos, key_pos = self.in_proj_qk(self.dropout(relative_embedding)).chunk(
-            2, dim=-1
-        )  # shape: [2C-1, D]
-        query_pos = query_pos.view(
-            -1, self.num_heads, self.head_size
-        )  # shape: [2C-1, H, D]
-        key_pos = key_pos.view(
-            -1, self.num_heads, self.head_size
-        )  # shape: [2C-1, H, D]
+        # relative positions
+        query_pos, key_pos = self.in_proj_qk(self.dropout(relative_embedding)).chunk(2, dim=-1)
+        query_pos = query_pos.view(-1, self.num_heads, self.head_size)
+        key_pos   = key_pos.view(-1, self.num_heads, self.head_size)
 
-        query = query.reshape(
-            query_len, batch_size * self.num_heads, self.head_size
-        ).transpose(0, 1)
-        key = key.reshape(
-            key_len, batch_size * self.num_heads, self.head_size
-        ).transpose(0, 1)
-        value = value.view(
-            key_len, batch_size * self.num_heads, self.head_size
-        ).transpose(0, 1)
+        # reshape to heads
+        query = query.reshape(query_len, B * self.num_heads, self.head_size).transpose(0, 1)  # [B*H, T, d]
+        key   = key.reshape(key_len,   B * self.num_heads, self.head_size).transpose(0, 1)    # [B*H, T, d]
+        value = value.reshape(key_len, B * self.num_heads, self.head_size).transpose(0, 1)    # [B*H, T, d]
 
-        attention_scores = torch.bmm(
-            query, key.transpose(1, 2) * self.scale
-        )  # shape: [B, H, Tq, Tk]
-        attention_scores = attention_scores.view(
-            batch_size, self.num_heads, query_len, key_len
-        )
+        # base scores [B, H, Tq, Tk]
+        attention_scores = torch.bmm(query, key.transpose(1, 2) * self.scale)                 # [B*H, Tq, Tk]
+        attention_scores = attention_scores.view(B, self.num_heads, query_len, key_len)       # [B, H, Tq, Tk]
 
-        query = query.view(batch_size, self.num_heads, query_len, self.head_size)
-        key = key.view(batch_size, self.num_heads, query_len, self.head_size)
+        # Q/K for positional components
+        query_h = query.view(B, self.num_heads, query_len, self.head_size)
+        key_h   = key.view(B, self.num_heads, key_len,   self.head_size)
 
-        attention_scores_qp = torch.einsum(
-            "bhqd,khd->bhqk", query, key_pos * self.scale
-        )  # shape: [B, H, Tq, Tr]
-        attention_scores_pk = torch.einsum(
-            "bhkd,qhd->bhqk", key * self.scale, query_pos
-        )  # shape: [B, H, Tr, Tk]
+        attention_scores_qp = torch.einsum("bhqd,khd->bhqk", query_h, key_pos * self.scale)   # [B,H,Tq,Tr]
+        attention_scores_pk = torch.einsum("bhkd,qhd->bhqk", key_h   * self.scale, query_pos) # [B,H,Tr,Tk]
 
-        position_indices = self.position_indices[:query_len, :key_len].expand(
-            batch_size, self.num_heads, -1, -1
-        )
-
-        attention_scores_qp = attention_scores_qp.gather(
-            dim=-1, index=position_indices
-        )  # shape: [B, H, Tq, Tk]
-        attention_scores_pk = attention_scores_pk.gather(
-            dim=-2, index=position_indices
-        )  # shape: [B, H, Tq, Tk]
+        position_indices = self.position_indices[:query_len, :key_len].expand(B, self.num_heads, -1, -1)
+        attention_scores_qp = attention_scores_qp.gather(dim=-1, index=position_indices)      # [B,H,Tq,Tk]
+        attention_scores_pk = attention_scores_pk.gather(dim=-2, index=position_indices)      # [B,H,Tq,Tk]
 
         attention_scores.add_(attention_scores_qp)
         attention_scores.add_(attention_scores_pk)
 
-        attention_probs = MaskedSoftmax.apply(attention_scores, attention_mask, -1)
+        # ---- MASK NORMALIZATION (robust, no brittle asserts) ----
+        # Goal: attention_mask_final = [B, 1, 1, L] (bool), aligned with Tk = L
+        m = attention_mask.to(hidden_states.device)
+        m = (m != 0) if m.dtype != torch.bool else m
+
+        # Common cases: [B, L], [B, 1, 1, L], [L], [B], transposed [L, B]
+        if m.dim() == 4 and m.shape == (B, 1, 1, L):
+            attention_mask_final = m
+        else:
+            # Reduce extra singleton dims
+            while m.dim() > 2:
+                if m.size(1) == 1:
+                    m = m.squeeze(1)
+                else:
+                    m = m.squeeze()
+
+            # Handle transposed [L, B]
+            if m.dim() == 2 and m.shape == (L, B):
+                m = m.transpose(0, 1)  # -> [B, L]
+
+            # 1D masks: [L] or [B]
+            if m.dim() == 1:
+                if m.size(0) == L:
+                    m = m.unsqueeze(0).expand(B, L)  # [B, L]
+                elif m.size(0) == B:
+                    # If only batch info provided, assume all positions valid
+                    m = m.unsqueeze(1).expand(B, L)  # [B, L]
+                else:
+                    # Fallback: assume all tokens valid
+                    m = torch.ones(B, L, dtype=torch.bool, device=hidden_states.device)
+
+            # Now coerce to exact [B, L], slice/pad if length differs
+            if m.shape != (B, L):
+                Bm, Lm = m.shape
+                # Fix batch if needed by expanding or slicing
+                if Bm != B:
+                    if Bm == 1:
+                        m = m.expand(B, Lm)
+                    else:
+                        # Slice to match B
+                        m = m[:B, ...]
+                # Fix length by slicing/padding
+                if Lm > L:
+                    m = m[:, :L]
+                elif Lm < L:
+                    pad = torch.ones(B, L - Lm, dtype=m.dtype, device=m.device)
+                    m = torch.cat([m, pad], dim=1)
+
+            attention_mask_final = m.unsqueeze(1).unsqueeze(2)  # [B,1,1,L]
+        # ---- END MASK NORMALIZATION ----
+
+        attention_probs = MaskedSoftmax.apply(attention_scores, attention_mask_final, -1)
 
         attention_probs = self.dropout(attention_probs)
-        context = torch.bmm(attention_probs.flatten(0, 1), value)  # shape: [B*H, Q, D]
-        context = context.transpose(0, 1).reshape(
-            context.size(1), -1, self.hidden_size
-        )  # shape: [Q, B, H*D]
+        # [B*H, Q, D]
+        context = torch.bmm(attention_probs.flatten(0, 1), value)
+        # [Q, B, H*D]
+        context = context.transpose(0, 1).reshape(context.size(1), -1, self.hidden_size)
         context = self.out_proj(context)
         context = self.post_layer_norm(context)
         context = self.dropout(context)
