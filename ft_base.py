@@ -51,8 +51,9 @@ val_dataset = VarDataset(val_encodings, val_labels)
 config_path = "configs/base.json"
 config = BertConfig(config_path)
 config.num_labels = 2
-
 model = BertForBinaryClassification(config)
+state_dict = torch.load("checkpoints/elc-bert-base_len-512_1000-steps/model.bin", map_location="cpu", weights_only=False)
+model.load_state_dict(state_dict, strict=False)
 
 training_args = TrainingArguments(
     output_dir="./results",
