@@ -65,3 +65,11 @@ class BertForBinaryClassification(nn.Module):
             loss = F.cross_entropy(logits, labels)
             return {"loss": loss, "logits": logits}
         return {"logits": logits}
+
+    @classmethod
+    def from_pretrained(cls, checkpoint_path, config, num_labels=2, map_location="cpu"):
+        # config must be a config object, not a Bert
+        model = cls(config, num_labels=num_labels)
+        state_dict = torch.load(checkpoint_path, map_location=map_location)
+        model.load_state_dict(state_dict, strict=False)
+        return model
