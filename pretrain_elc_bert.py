@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import os
+import os.path
 import argparse
 from tqdm import tqdm
 from itertools import count
@@ -13,6 +14,7 @@ from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel
 import torch.distributed as dist
 
+from tokenizers import Tokenizer
 from transformers import AutoTokenizer
 from pre_training.lamb import Lamb
 from pre_training.config import BertConfig
@@ -402,8 +404,8 @@ def training_epoch(
                                     lr: {optimizer.param_groups[0]['lr']:.5f}"
                 )
 
-                # if global_step % 100 == 0:
-                #     log_parameter_histograms(model, global_step)
+                if global_step % 100 == 0:
+                    log_parameter_histograms(model, global_step)
 
                 total_loss = 0
                 avg_accuracy = 0
