@@ -1,1 +1,0 @@
-nohup torchrun --nproc_per_node=2 train_elc_bert_zero.py --input_path='./data/processed/hg38_sequences_len_1024.txt' --vocab_path='InstaDeepAI/nucleotide-transformer-500m-human-ref' --seq_len=1024 --learning_rate=1e-5 --batch_size=4 --max_steps=100 --output_dir='./checkpoints/elc-bert-zero_len-1024_100-steps' &

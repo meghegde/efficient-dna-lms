@@ -1,1 +1,0 @@
-nohup torchrun --nproc_per_node=2 fine_tune_elc_bert.py --model_variant="zero" --pretrained_model_path="checkpoints/elc-bert-zero_len-512_1000-steps/model.bin" --dataset="eQTL" --loss_convergence="True" &
