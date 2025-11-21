@@ -318,8 +318,7 @@ def training_epoch(
     max_local_steps,
 ):
     seed = args.seed + get_rank() + epoch * get_world_size()
-    # train_dataloader = create_train_dataloader(data, args, global_step, seed)
-    train_dataloader = create_train_dataloader(args, seed)
+    train_dataloader = create_train_dataloader(data, args, global_step, seed)
 
     model = model.train()
     optimizer.zero_grad(set_to_none=True)
