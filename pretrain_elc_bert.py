@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel
 import torch.distributed as dist
 
-from tokenizers import Tokenizer
+from datasets import load_dataset
 from transformers import AutoTokenizer
 from pre_training.lamb import Lamb
 from pre_training.config import BertConfig
@@ -320,7 +320,8 @@ def training_epoch(
     max_local_steps,
 ):
     seed = args.seed + get_rank() + epoch * get_world_size()
-    train_dataloader = create_train_dataloader(data, args, global_step, seed)
+    # train_dataloader = create_train_dataloader(data, args, global_step, seed)
+    train_dataloader = create_train_dataloader(args, seed)
 
     model = model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -404,8 +405,8 @@ def training_epoch(
                                     lr: {optimizer.param_groups[0]['lr']:.5f}"
                 )
 
-                if global_step % 100 == 0:
-                    log_parameter_histograms(model, global_step)
+                # if global_step % 100 == 0:
+                #     log_parameter_histograms(model, global_step)
 
                 total_loss = 0
                 avg_accuracy = 0
@@ -448,59 +449,84 @@ def save(model, optimizer, grad_scaler, scheduler, global_step, epoch, args):
     return checkpoint_path
 
 
-def load_dataset(args, tokenizer, device):
-    seq_length = (
-        args.seq_length * 4
-        if global_step >= int(args.device_max_steps * args.long_after)
-        else args.seq_length
-    )
-    # Using new text_file_dataset.py
-    train_data = Dataset(args.input_path, tokenizer, max_length=seq_length)
+# def load_dataset(args, tokenizer, device):
+#     seq_length = (
+#         args.seq_length * 4
+#         if global_step >= int(args.device_max_steps * args.long_after)
+#         else args.seq_length
+#     )
+#     # Using new text_file_dataset.py
+#     train_data = Dataset(args.input_path, tokenizer, max_length=seq_length)
 
-    print(f"Loaded training file {get_rank()}", flush=True)
-    print(f"First item: {train_data.__getitem__(0)}")
+#     print(f"Loaded training file {get_rank()}", flush=True)
+#     print(f"First item: {train_data.__getitem__(0)}")
 
-    batch_size = (
-        args.batch_size // 4
-        if global_step > args.device_max_steps * args.long_after
-        else args.batch_size
-    )
-    min_length = torch.tensor(
-        len(train_data) // batch_size, dtype=torch.long, device=device
-    )
-    torch.distributed.all_reduce(min_length, torch.distributed.ReduceOp.MIN)
+#     batch_size = (
+#         args.batch_size // 4
+#         if global_step > args.device_max_steps * args.long_after
+#         else args.batch_size
+#     )
+#     min_length = torch.tensor(
+#         len(train_data) // batch_size, dtype=torch.long, device=device
+#     )
+#     torch.distributed.all_reduce(min_length, torch.distributed.ReduceOp.MIN)
 
-    return train_data, min_length
+#     return train_data, min_length
 
 
-def create_train_dataloader(data, args, global_step, seed):
-#    batch_size = (
-#        args.batch_size // 4
-#        if global_step >= int(args.device_max_steps * args.long_after)
-#        else args.batch_size
-#    )
-    batch_size = args.batch_size
+# def create_train_dataloader(data, args, global_step, seed):
+# #    batch_size = (
+# #        args.batch_size // 4
+# #        if global_step >= int(args.device_max_steps * args.long_after)
+# #        else args.batch_size
+# #    )
+#     batch_size = args.batch_size
 
-    def collate_fn(batch):
-        """
-        batch: list of items returned by Dataset
-        Each item is a dict: {'input_ids': tensor, 'attention_mask': tensor}
-        """
-        input_ids = torch.stack([item['input_ids'] for item in batch])
-        attention_mask = torch.stack([item['attention_mask'] for item in batch])
-        # Add target_ids if needed for MLM, e.g., same as input_ids or with masking
-        target_ids = input_ids.clone()  # for MLM, or generate masked labels here
-        return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'target_ids': target_ids
-        }
+#     def collate_fn(batch):
+#         """
+#         batch: list of items returned by Dataset
+#         Each item is a dict: {'input_ids': tensor, 'attention_mask': tensor}
+#         """
+#         input_ids = torch.stack([item['input_ids'] for item in batch])
+#         attention_mask = torch.stack([item['attention_mask'] for item in batch])
+#         # Add target_ids if needed for MLM, e.g., same as input_ids or with masking
+#         target_ids = input_ids.clone()  # for MLM, or generate masked labels here
+#         return {
+#             'input_ids': input_ids,
+#             'attention_mask': attention_mask,
+#             'target_ids': target_ids
+#         }
 
-    # DataLoader
-    train_dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=7-1,
-        generator=torch.Generator().manual_seed(seed), drop_last=True, pin_memory=True, collate_fn=collate_fn)
+#     # DataLoader
+#     train_dataloader = DataLoader(data, batch_size=batch_size, shuffle=True, num_workers=7-1,
+#         generator=torch.Generator().manual_seed(seed), drop_last=True, pin_memory=True, collate_fn=collate_fn)
 
+#     return train_dataloader
+
+def collate_fn(batch):
+    """
+    batch: list of items returned by Dataset
+    Each item is a dict: {'input_ids': tensor, 'attention_mask': tensor}
+    """
+    input_ids = torch.stack([item['input_ids'] for item in batch])
+    attention_mask = torch.stack([item['attention_mask'] for item in batch])
+    # Add target_ids if needed for MLM, e.g., same as input_ids or with masking
+    target_ids = input_ids.clone()  # for MLM, or generate masked labels here
+    return {
+        'input_ids': input_ids,
+        'attention_mask': attention_mask,
+        'target_ids': target_ids
+    }
+
+def create_train_dataloader(args, seed):
+    ds = load_dataset("InstaDeepAI/human_reference_genome", split="train")
+    train_dataloader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
+                                  generator=torch.Generator().manual_seed(seed),
+                                  drop_last=False, pin_memory=True,
+                                  collate_fn=collate_fn)
+    
     return train_dataloader
+
 
 if __name__ == "__main__":
     args = parse_arguments()
