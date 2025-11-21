@@ -10,9 +10,9 @@ from transformers import (
     DataCollatorWithPadding,
     EvalPrediction,
 )
-from models.model_elc_bert_base import Bert
+from models.model_elc_bert_normalized import Bert
 from pre_training.config import BertConfig
-from models.base_clf_wrapper import BertForBinaryClassification
+from models.normalized_clf_wrapper import BertForBinaryClassification
 import evaluate
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from scipy.special import softmax
@@ -24,7 +24,7 @@ transformers.set_seed(42)
 MAX_LEN = 512
 TASK_NAME = "variant_effect_causal_eqtl"
 TOK_PATH = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
-MODEL_NAME = "./trained_models/base_len-512_42/model.bin/pytorch_model.bin"
+MODEL_NAME = "./trained_models/normalized_len-512_42/model.bin/pytorch_model.bin"
 CONFIG_PATH = "./configs/base.json"
 
 # Load dataset
@@ -64,20 +64,6 @@ training_args = TrainingArguments(
     logging_dir="./logs",
     report_to="none",
 )
-
-## Load accuracy metric
-#accuracy_metric = evaluate.load('accuracy')
-#f1_metric = evaluate.load("f1")
-#
-#def compute_metrics(eval_pred):
-#    logits, labels = eval_pred
-#    probs = 1 / (1 + np.exp(-logits))
-#    predictions = (probs > 0.5).astype(int)
-#
-#    return {
-#        "accuracy": accuracy_metric.compute(predictions=predictions, references=labels)["accuracy"],
-#        "f1": f1_metric.compute(predictions=predictions, references=labels)["f1"],
-#    }
 
 # Define metrics
 def compute_metrics(eval_pred):
@@ -133,5 +119,5 @@ trainer = Trainer(
 eval_results = trainer.evaluate()
 print(eval_results)
 
-# Base model, pretrained for 1000 steps, then fine-tuned to convergence
-# {'eval_loss': 0.693474292755127, 'eval_accuracy': 0.48589483186639587, 'eval_runtime': 46.4031, 'eval_samples_per_second': 190.979, 'eval_steps_per_second': 3.987}
+# Normalized-initialised model, pretrained for 1000 steps, then fine-tuned to convergence
+# {'eval_loss': 0.6934105753898621, 'eval_accuracy': 0.48589483186639587, 'eval_runtime': 47.0144, 'eval_samples_per_second': 188.495, 'eval_steps_per_second': 3.935}
