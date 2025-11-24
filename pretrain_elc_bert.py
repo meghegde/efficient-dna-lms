@@ -6,6 +6,7 @@ import argparse
 from tqdm import tqdm
 from itertools import count
 from socket import gethostname
+import time
 
 import torch
 import torch.nn as nn
@@ -328,6 +329,12 @@ def training_epoch(
     total_loss = 0
     avg_accuracy = 0
 
+    # Initialise variables
+    running_correct = 0
+    running_total = 0
+    train_losses = []
+    train_accuracies = []
+
     if is_main_process():
         current_step = global_step * args.gradient_accumulation
         max_steps = args.device_max_steps * args.gradient_accumulation
@@ -397,33 +404,40 @@ def training_epoch(
             scheduler.step()
 
             if is_main_process():
+                epoch_acc = running_correct / running_total if running_total > 0 else 0.0
                 train_iter.set_postfix_str(
                     f"loss: {total_loss:.2f}, \
-                                    accuracy: {avg_accuracy * 100.0:.2f}, \
+                                    accuracy: {epoch_acc * 100.0:.2f}, \
                                     grad_norm: {grad_norm:.2f}, \
                                     lr: {optimizer.param_groups[0]['lr']:.5f}"
                 )
 
-                if global_step % 100 == 0:
-                    log_parameter_histograms(model, global_step)
+                epoch_loss = total_loss / len(train_dataloader)
+                epoch_acc = running_correct / running_total if running_total > 0 else 0.0
+                print(f"Epoch {epoch}: Loss={epoch_loss:.4f}, Accuracy={epoch_acc:.4f}")
+                train_losses.append(epoch_loss)
+                train_accuracies.append(epoch_acc)
 
                 total_loss = 0
                 avg_accuracy = 0
+                running_correct = 0
+                running_total = 0
 
         if (
             global_step == int(args.device_max_steps * args.long_after)
             and (local_step + 1) % args.gradient_accumulation == 0
         ):
             optimizer.zero_grad(set_to_none=True)
-            return global_step
+            return global_step, train_losses, train_accuracies
 
         # Exiting the training due to hitting max steps
         if global_step >= args.device_max_steps or local_step >= max_local_steps - 1:
             optimizer.zero_grad(set_to_none=True)
-            return global_step
+            return global_step, train_losses, train_accuracies
 
     optimizer.zero_grad(set_to_none=True)
-    return global_step
+
+    return global_step, train_losses, train_accuracies
 
 def save(model, optimizer, grad_scaler, scheduler, global_step, epoch, args):
     if args.output_dir == "./checkpoints/elc_bert":
@@ -502,6 +516,28 @@ def create_train_dataloader(data, args, global_step, seed):
 
     return train_dataloader
 
+def plot_metrics(train_losses, train_accuracies, args):
+    import matplotlib.pyplot as plt
+    epochs = range(1, len(train_losses) + 1)
+
+    plt.figure(figsize=(12,5))
+    plt.subplot(1,2,1)
+    plt.plot(epochs, train_losses, marker='o')
+    plt.title("Training Loss per Epoch")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+
+    plt.subplot(1,2,2)
+    plt.plot(epochs, train_accuracies, marker='o')
+    plt.title("Training Accuracy per Epoch")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+
+    plt.tight_layout()
+    plt.savefig(f"{args.checkpoint_path}/loss_acc.png")
+    plt.close()
+    print(f"Saved training curves to {args.checkpoint_path}/loss_acc.png.")
+
 if __name__ == "__main__":
     args = parse_arguments()
     args.mixed_precision = True
@@ -525,11 +561,13 @@ if __name__ == "__main__":
     )
     train_data, min_length = load_dataset(args, tokenizer, device)
 
+    start_training = time.time()
+
     for epoch in count(initial_epoch):
         if global_step == int(args.device_max_steps * args.long_after):
             train_data, min_length = load_dataset(args, tokenizer, device)
 
-        global_step = training_epoch(
+        global_step, train_losses, train_accuracies = training_epoch(
             model,
             tokenizer,
             train_data,
@@ -545,6 +583,10 @@ if __name__ == "__main__":
         checkpoint_path = save(
             model, optimizer, grad_scaler, scheduler, global_step, epoch, args
         )
+        plot_metrics(train_losses, train_accuracies, args)
 
         if global_step >= args.device_max_steps:
+            end_training = time.time()
+            total_time = end_training - start_training
+            print(f"Total training time: {total_time/60:.2f} minutes")
             break
