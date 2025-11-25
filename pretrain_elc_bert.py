@@ -534,9 +534,9 @@ def plot_metrics(train_losses, train_accuracies, args):
     plt.ylabel("Accuracy")
 
     plt.tight_layout()
-    plt.savefig(f"{args.checkpoint_path}/loss_acc.png")
+    plt.savefig(f"{args.output_dir}/loss_acc.png")
     plt.close()
-    print(f"Saved training curves to {args.checkpoint_path}/loss_acc.png.")
+    print(f"Saved training curves to {args.output_dir}/loss_acc.png.")
 
 if __name__ == "__main__":
     args = parse_arguments()
