@@ -7,6 +7,7 @@ from tqdm import tqdm
 from itertools import count
 from socket import gethostname
 import time
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -517,7 +518,6 @@ def create_train_dataloader(data, args, global_step, seed):
     return train_dataloader
 
 def plot_metrics(train_losses, train_accuracies, args):
-    import matplotlib.pyplot as plt
     epochs = range(1, len(train_losses) + 1)
 
     plt.figure(figsize=(12,5))

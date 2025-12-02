@@ -16,10 +16,12 @@ seed = 42
 tok_path = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
 config_path = "configs/base.json"
 model_variant = "base"
-seq_length = 512
-pretrained_weights = "checkpoints/elc-bert-base_len-512_1000-steps/model.bin"
+# seq_length = 512
+seq_length = 1024
+# pretrained_weights = "checkpoints/elc-bert-base_len-512_1000-steps/model.bin"
+pretrained_weights = "checkpoints/elc-bert-base_len-1024_1000-steps/model.bin"
 model_name = f"{model_variant}_len-{seq_length}_{seed}"
-odir = f"./trained_models/{model_name}/model.bin"
+odir = f"./trained_models/{model_name}"
 logdir = f"./logs/{model_name}.txt"
 tblogdir = f"./tblogs/{model_name}"
 
@@ -151,4 +153,3 @@ history = trainer.state.log_history
 logSave = open(logdir, 'w')
 logSave.write(str(history))
 logSave.close()
-
