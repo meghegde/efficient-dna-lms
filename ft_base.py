@@ -10,17 +10,25 @@ from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
 from models.base_clf_wrapper import BertForBinaryClassification
 from models.model_elc_bert_base import Bert
 from pre_training.config import BertConfig
+from sklearn.metrics import f1_score
+#from torch.optim import SGD
 
 # Constants
 seed = 42
+#seed = 41
 tok_path = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
-config_path = "configs/base.json"
+config_path = "configs/newbase.json"
 model_variant = "base"
+num_epochs = 10
 # seq_length = 512
-seq_length = 1024
-# pretrained_weights = "checkpoints/elc-bert-base_len-512_1000-steps/model.bin"
-pretrained_weights = "checkpoints/elc-bert-base_len-1024_1000-steps/model.bin"
-model_name = f"{model_variant}_len-{seq_length}_{seed}"
+seq_length = 768
+# seq_length = 1024
+# pretrained_weights = "checkpoints/elc-bert-base-len_512/model.bin"
+pretrained_weights = "checkpoints/elc-bert-base-len_768/model.bin"
+# pretrained_weights = "checkpoints/elc-bert-base-len_1024/model.bin"
+# pretrained_weights = "checkpoints/elc-bert-base_tinydnabert/model.bin"
+# model_name = f"{model_variant}_len-{seq_length}_{seed}"
+model_name = f"{model_variant}_len-{seq_length}_{seed}_{num_epochs}_epochs"
 odir = f"./trained_models/{model_name}"
 logdir = f"./logs/{model_name}.txt"
 tblogdir = f"./tblogs/{model_name}"
@@ -108,18 +116,24 @@ def compute_metrics(eval_pred):
     # Compute accuracy directly (avoid extra format errors)
     accuracy = (pred_ids == labels).mean().item()
 
-    return {"accuracy": accuracy}
+    # Compute F1 score
+    f1 = f1_score(labels, pred_ids, average="weighted")
+
+    return {"accuracy": accuracy, "f1": f1}
 
 # Define training arguments
 # Create Early Stopping callback
-es = EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=0.0)
+# es = EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=0.0)
 
 # Set up training arguments
 training_args = TrainingArguments(
+    num_train_epochs=num_epochs,
     output_dir=odir,
     eval_strategy="epoch",
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    learning_rate=5e-05,
+    warmup_ratio=0.15, # Ratio of total steps to warm up from 0 to learning_rate
     save_safetensors=False,
     save_total_limit=2,  # save only the two latest checkpoints
     save_strategy="epoch",
@@ -132,6 +146,9 @@ training_args = TrainingArguments(
     greater_is_better=False,
 )
 
+## Change optimiser from default
+#optimiser = SGD(model.parameters(), lr=1e-3, momentum=0.9)
+
 # Create trainer instance
 trainer = Trainer(
     model=model,
@@ -139,7 +156,8 @@ trainer = Trainer(
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
     compute_metrics=compute_metrics,
-    callbacks=[es]
+#    callbacks=[es],
+#    optimizers=(optimiser, None)
 )
 
 # Train model
@@ -153,3 +171,65 @@ history = trainer.state.log_history
 logSave = open(logdir, 'w')
 logSave.write(str(history))
 logSave.close()
+
+# Sequence length 512
+#{'eval_loss': 0.6932368278503418, 'eval_accuracy': 0.4979227487087357, 'eval_runtime': 57.7483, 'eval_samples_per_second': 308.442, 'eval_steps_per_second': 19.291, 'epoch': 3.0}
+#{'train_runtime': 2432.7478, 'train_samples_per_second': 87.861, 'train_steps_per_second': 5.491, 'train_loss': 0.711148133525253, 'epoch': 3.0}
+
+# Sequence length 1024 (pretraining truncated at approx 90% due to GPU OOM)
+# {'eval_loss': 0.6932483911514282, 'eval_accuracy': 0.4979227487087357, 'eval_runtime': 57.6915, 'eval_samples_per_second': 308.745, 'eval_steps_per_second': 19.31, 'epoch': 3.0}
+# {'train_runtime': 4296.2988, 'train_samples_per_second': 49.751, 'train_steps_per_second': 3.109, 'train_loss': 0.71148204332305, 'epoch': 3.0}
+
+# Sequence length 1024 - increase warmup_steps to 100
+#{'eval_loss': 0.6932516694068909, 'eval_accuracy': 0.4979227487087357, 'eval_runtime': 59.4099, 'eval_samples_per_second': 299.815, 'eval_steps_per_second': 18.751, 'epoch': 3.0}
+#{'train_runtime': 4290.8268, 'train_samples_per_second': 49.814, 'train_steps_per_second': 3.113, 'train_loss': 0.7118884804131198, 'epoch': 3.0}
+
+## Pretraining on TinyDNABERT dataset - max_length=1024 - once again, pretraining truncated at 90% due to GPU OOM
+#{'eval_loss': 0.6932060122489929, 'eval_accuracy': 0.4979227487087357, 'eval_runtime': 59.2382, 'eval_samples_per_second': 300.684, 'eval_steps_per_second': 18.805, 'epoch': 3.0}
+#{'train_runtime': 4256.5717, 'train_samples_per_second': 50.215, 'train_steps_per_second': 3.138, 'train_loss': 0.7108661194156053, 'epoch': 3.0}
+
+# Sequence length 1024
+# Updated TrainingArguments to:
+# Set up training arguments
+#training_args = TrainingArguments(
+#    output_dir=odir,
+#    eval_strategy="epoch",
+#    per_device_train_batch_size=16,
+#    per_device_eval_batch_size=16,
+#    learning_rate=5e-05,
+#    warmup_ratio=0.15, # Ratio of total steps to warm up from 0 to learning_rate
+#    save_safetensors=False,
+#    save_total_limit=2,  # save only the two latest checkpoints
+#    save_strategy="epoch",
+#    load_best_model_at_end=True,  # This saves also the best performing one
+#    logging_dir=tblogdir,  # <-- directory for TensorBoard logs
+#    logging_strategy="steps",  # log every n steps
+#    logging_steps=50,
+#    # Arguments for early stopping
+#    metric_for_best_model='loss',
+#    greater_is_better=False,
+#)
+#
+#{'eval_loss': 0.6932055950164795, 'eval_accuracy': 0.4979227487087357, 'eval_f1': 0.33102783690999416, 'eval_runtime': 38.734, 'eval_samples_per_second': 459.855, 'eval_steps_per_second': 14.38, 'epoch': 3.0}
+#{'train_runtime': 3875.5308, 'train_samples_per_second': 55.152, 'train_steps_per_second': 1.724, 'train_loss': 0.7169729754375566, 'epoch': 3.0}
+
+# Sequence length 1024, change optimiser to SGD
+#{'eval_loss': 0.6931596994400024, 'eval_accuracy': 0.4979227487087357, 'eval_f1': 0.33102783690999416, 'eval_runtime': 38.3342, 'eval_samples_per_second': 464.651, 'eval_steps_per_second': 14.53, 'epoch': 3.0}
+#{'train_runtime': 3851.4623, 'train_samples_per_second': 55.497, 'train_steps_per_second': 1.735, 'train_loss': 0.7503687098182937, 'epoch': 3.0}
+
+# Sequence length 1024, back to default optimiser, change seed to 41
+#{'eval_loss': 0.6932083964347839, 'eval_accuracy': 0.4979227487087357, 'eval_f1': 0.33102783690999416, 'eval_runtime': 38.7528, 'eval_samples_per_second': 459.632, 'eval_steps_per_second': 14.373, 'epoch': 3.0}
+#{'train_runtime': 3876.2487, 'train_samples_per_second': 55.142, 'train_steps_per_second': 1.724, 'train_loss': 0.7147506787523219, 'epoch': 3.0}
+
+# Sequence length 1024 - remove early stopping and train for 10 epochs instead
+# {'eval_loss': 0.693282961845398, 'eval_accuracy': 0.4979227487087357, 'eval_f1': 0.33102783690999416, 'eval_runtime': 38.692, 'eval_samples_per_second': 460.354, 'eval_steps_per_second': 14.396, 'epoch': 10.0}
+# {'train_runtime': 12893.6039, 'train_samples_per_second': 55.258, 'train_steps_per_second': 1.727, 'train_loss': 0.7039725468519508, 'epoch': 10.0}
+
+## Sequence length 1024 - train for 50 epochs
+#{'eval_loss': 0.6931859850883484, 'eval_accuracy': 0.4979227487087357, 'eval_f1': 0.33102783690999416, 'eval_runtime': 38.8959, 'eval_samples_per_second': 457.941, 'eval_steps_per_second': 14.32, 'epoch': 50.0}
+#{'train_runtime': 64596.4465, 'train_samples_per_second': 55.149, 'train_steps_per_second': 1.724, 'train_loss': 0.696911261720833, 'epoch': 50.0}
+
+# Sequence length 768 - train for 10 epochs (N.B. pretraining truncated at 90% due to GPU OOM)
+#{'eval_loss': 0.693278431892395, 'eval_accuracy': 0.4979227487087357, 'eval_f1': 0.33102783690999416, 'eval_runtime': 33.679, 'eval_samples_per_second': 528.875, 'eval_steps_per_second': 16.538, 'epoch': 10.0}
+#{'train_runtime': 9961.9863, 'train_samples_per_second': 71.52, 'train_steps_per_second': 2.235, 'train_loss': 0.7040464336581973, 'epoch': 10.0}
+
