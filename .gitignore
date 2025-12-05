@@ -160,3 +160,6 @@ cython_debug/
 #.idea/
 github_key
 github_key.pub
+
+# Model checkpoints
+checkpoints/*
